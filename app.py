@@ -1,6 +1,7 @@
 import os
 import re
 import logging
+import base64
 from typing import Any
 from urllib.parse import quote
 
