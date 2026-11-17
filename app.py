@@ -168,35 +168,93 @@ def search():
 def stream(video_id):
     if not re.fullmatch(r"[A-Za-z0-9_-]{6,20}", video_id):
         abort(400)
+
     url = "https://www.youtube.com/watch?v=" + quote(video_id)
+
     opts = {
-        "quiet": True, "no_warnings": True, "format": "bestaudio[acodec!=none]/bestaudio",
-        "noplaylist": True, "socket_timeout": 20,
-        "extractor_args": {"youtube": {"player_client": ["android", "web"]}},
+        "quiet": True,
+        "no_warnings": True,
+        "format": "bestaudio[acodec!=none]/bestaudio",
+        "noplaylist": True,
+        "socket_timeout": 20,
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["android", "web"]
+            }
+        },
     }
+
+    # Optional Netscape-format cookies supplied as a Base64 Render secret.
+    cookie_data = os.environ.get("YOUTUBE_COOKIES_B64")
+    if cookie_data:
+        try:
+            cookie_bytes = base64.b64decode(cookie_data, validate=True)
+            cookie_path = "/tmp/youtube_cookies.txt"
+
+            with open(cookie_path, "wb") as cookie_file:
+                cookie_file.write(cookie_bytes)
+
+            opts["cookiefile"] = cookie_path
+            log.info("YouTube cookies loaded")
+        except Exception:
+            # Do not log cookie data or secret contents.
+            log.exception("Could not decode/write YOUTUBE_COOKIES_B64")
+            return jsonify({
+                "error": "Invalid YouTube cookies configuration"
+            }), 500
+
+    upstream = None
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=False)
+
         audio_url = info.get("url")
         if not audio_url:
-            abort(502)
+            return jsonify({"error": "No playable audio URL was returned"}), 502
+
         headers = {}
         if request.headers.get("Range"):
             headers["Range"] = request.headers["Range"]
-        upstream = requests.get(audio_url, headers=headers, stream=True, timeout=25)
+
+        upstream = requests.get(
+            audio_url,
+            headers=headers,
+            stream=True,
+            timeout=(15, 60)
+        )
+        upstream.raise_for_status()
+
         excluded = {"content-encoding", "transfer-encoding", "connection"}
-        response_headers = {k: v for k, v in upstream.headers.items() if k.lower() not in excluded}
+        response_headers = {
+            key: value
+            for key, value in upstream.headers.items()
+            if key.lower() not in excluded
+        }
         response_headers["Accept-Ranges"] = "bytes"
+
+        def generate():
+            try:
+                for chunk in upstream.iter_content(chunk_size=64 * 1024):
+                    if chunk:
+                        yield chunk
+            finally:
+                upstream.close()
+
         return Response(
-            upstream.iter_content(chunk_size=64 * 1024),
+            generate(),
             status=upstream.status_code,
             headers=response_headers,
-            content_type=upstream.headers.get("Content-Type", "audio/webm"),
-            direct_passthrough=True
+            content_type=upstream.headers.get("Content-Type", "audio/webm")
         )
+
     except Exception as exc:
+        if upstream is not None:
+            upstream.close()
         log.exception("Audio extraction failed for %s", video_id)
-        return jsonify({"error": "Could not load this track. Try another result.", "detail": str(exc)[:220]}), 502
+        return jsonify({
+            "error": "Could not load this track. Try another result.",
+            "detail": str(exc)[:220]
+        }), 502
 
 
 @app.get("/<path:path>")
