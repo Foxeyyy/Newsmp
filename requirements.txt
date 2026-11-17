@@ -1,4 +1,6 @@
+
 Flask>=3.0,<4
 innertube>=1.0
 yt-dlp>=2025.1.15
 requests>=2.31
+gunicorn>=22.0
